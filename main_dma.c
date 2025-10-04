@@ -13,7 +13,7 @@
 uint8_t __attribute__((aligned(32))) list_vert_buf[VERTBUF_SIZE];
 
 /*
- PVR init params. This sample uses TR polygons only.
+ PVR init params. This sample uses OP polygons only.
 */
 
 pvr_init_params_t pvr_params = {
@@ -1089,4 +1089,5 @@ int main(int argc, char **argv)
     exit(0);
 
     return 0;
+
 }
