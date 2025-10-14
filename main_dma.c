@@ -5,23 +5,24 @@
 #include <png/png.h>
 #include <math.h>
 
+#include <dreamcast/sh4zam/shz_sh4zam.h>
 /*
- Vertex DMA buffer. Oversized just because.
+ Vertex DMA buffer. 
  */
-#define VERTBUF_SIZE (1536 * 1024)
+#define VERTBUF_SIZE (1024 * 1024 * 4)
 
 uint8_t __attribute__((aligned(32))) list_vert_buf[VERTBUF_SIZE];
 
 /*
- PVR init params. This sample uses TR polygons only.
+ PVR init params. This sample uses OP polygons only.
 */
 
 pvr_init_params_t pvr_params = {
-    {PVR_BINSIZE_16, 0, 0, 0, 0},
-    (VERTBUF_SIZE) / 2,
+    {PVR_BINSIZE_32, 0, 0, 0, 0},
+    (512*1024),
     1, // dma enabled
     0, // fsaa
-    1, // 1 is autosort disabled
+    0, // 1 is autosort disabled
     2, // extra OPBs
     0, // Vertex buffer double-buffering enabled
 };
@@ -51,12 +52,16 @@ typedef struct
 static int debug_color = 0;
 static int drawn = 0;
 static int material_change = 0;
-
+static pvr_poly_hdr_t default_hdr;
+static float fog_near = 8.0f;
+static float fog_far = 27.0f;
 #define approx_recip(x) (1.0f / sqrtf((x) * (x)))
 
 #define lerp(a, b, t) ((a) + (((b) - (a)) * (t)))
 
 #define transform_dmaListVert(dmav) mat_trans_single3_nodivw((dmav)->v->x, (dmav)->v->y, (dmav)->v->z, (dmav)->w)
+
+void *memcpy32(void *restrict dst, const void *restrict src, size_t bytes);
 
 /*
 credit to Kazade / glDC code for my near-z clipping implementation
@@ -139,13 +144,19 @@ static void nearz_clip(const dmaListVert_t *restrict v1,
     out->v->argb = color_lerp(t, v1->v->argb, v2->v->argb);
     out->v->oargb = color_lerp(t, v1->v->oargb, v2->v->oargb);
 }
-
+static size_t written_total = 0;
 // initialize a dmaPoly_t * for rendering the next polygon
 // n_verts	3 for triangle
 //			4 for quad
 // diffuse_hdr is pointer to header to submit if a new pvr header submission is required
 static void init_poly(int list, dmaPoly_t *poly, pvr_poly_hdr_t *diffuse_hdr, unsigned n_verts)
 {
+    if ((written_total + (6*32)) >= (VERTBUF_SIZE/4))
+    {
+        printf("overflow list buffer\n");
+        exit(-1);
+    }
+
     void *list_tail = (void *)pvr_vertbuf_tail(list);
 
     poly->n_verts = n_verts;
@@ -156,7 +167,7 @@ static void init_poly(int list, dmaPoly_t *poly, pvr_poly_hdr_t *diffuse_hdr, un
     if (material_change)
     {
         // copy the contents of the header into poly struct
-        memcpy(poly->hdr, diffuse_hdr, sizeof(pvr_poly_hdr_t));
+        memcpy32(poly->hdr, diffuse_hdr, sizeof(pvr_poly_hdr_t));
 
         // advance the vertbuf/DMA list position
         list_tail += sizeof(pvr_poly_hdr_t);
@@ -205,7 +216,11 @@ static void submit_poly(int list, dmaPoly_t *p)
     dmaListVert_t *dv = p->dVerts;
     for (i = 0; i < verts_to_process; i++)
     {
-        transform_dmaListVert(dv);
+        shz_vec4_t out = shz_xmtrx_transform_vec4((shz_vec4_t) { .x = dv->v->x, .y = dv->v->y, .z = dv->v->z, .w = 1.0f });
+        dv->v->x = out.x;
+        dv->v->y = out.y;
+        dv->v->z = out.z;
+        dv->w = out.w;
         dv++;
     }
 
@@ -225,7 +240,9 @@ static void submit_poly(int list, dmaPoly_t *p)
     else
         p->dVerts[2].v->flags = PVR_CMD_VERTEX_EOL;
 
-    verts_to_process = clip_poly(p, p_vismask);
+    if (p_vismask != 7)
+        verts_to_process = clip_poly(p, p_vismask);
+
     if (!verts_to_process)
         return;
 
@@ -236,7 +253,7 @@ static void submit_poly(int list, dmaPoly_t *p)
     for (i = 0; i < verts_to_process; i++)
     {
         pvr_vertex_t *pv = dv->v;
-        float invw = approx_recip(dv->w);
+        float invw = shz_invf_fsrra(dv->w);
         pv->x *= invw;
         pv->y *= invw;
         pv->z = invw;
@@ -246,8 +263,10 @@ static void submit_poly(int list, dmaPoly_t *p)
 
     uint32_t amount = (material_change * sizeof(pvr_poly_hdr_t)) + (verts_to_process * sizeof(pvr_vertex_t));
     material_change = 0;
+
     // update diffuse/DMA list pointer
     pvr_vertbuf_written(list, amount);
+    written_total += amount;
 }
 
 static unsigned __attribute__((noinline)) clip_poly(dmaPoly_t *p, unsigned p_vismask)
@@ -260,14 +279,12 @@ static unsigned __attribute__((noinline)) clip_poly(dmaPoly_t *p, unsigned p_vis
     case 1:
         nearz_clip(&p->dVerts[0], &p->dVerts[1], &p->dVerts[1]);
         nearz_clip(&p->dVerts[0], &p->dVerts[2], &p->dVerts[2]);
-
         break;
 
     // tri only 1 visible
     case 2:
         nearz_clip(&p->dVerts[0], &p->dVerts[1], &p->dVerts[0]);
         nearz_clip(&p->dVerts[1], &p->dVerts[2], &p->dVerts[2]);
-
         break;
 
     // tri 0 + 1 visible
@@ -303,7 +320,7 @@ static unsigned __attribute__((noinline)) clip_poly(dmaPoly_t *p, unsigned p_vis
     case 6:
         verts_to_process = 4;
 
-        memcpy(p->dVerts[3].v, p->dVerts[2].v, sizeof(pvr_vertex_t));
+        memcpy32(p->dVerts[3].v, p->dVerts[2].v, sizeof(pvr_vertex_t));
         p->dVerts[3].w = p->dVerts[2].w;
 
         nearz_clip(&p->dVerts[0], &p->dVerts[2], &p->dVerts[2]);
@@ -312,6 +329,7 @@ static unsigned __attribute__((noinline)) clip_poly(dmaPoly_t *p, unsigned p_vis
         p->dVerts[2].v->flags = PVR_CMD_VERTEX;
         break;
 
+#if 0
     // tri all visible
     case 7:
 
@@ -389,7 +407,7 @@ static unsigned __attribute__((noinline)) clip_poly(dmaPoly_t *p, unsigned p_vis
         nearz_clip(&p->dVerts[1], &p->dVerts[3], &p->dVerts[0]);
         nearz_clip(&p->dVerts[2], &p->dVerts[3], &p->dVerts[2]);
 
-        memcpy(p->dVerts[1].v, p->dVerts[3].v, sizeof(pvr_vertex_t));
+        memcpy32(p->dVerts[1].v, p->dVerts[3].v, sizeof(pvr_vertex_t));
         p->dVerts[1].w = p->dVerts[3].w;
 
         p->dVerts[1].v->flags = PVR_CMD_VERTEX;
@@ -432,7 +450,7 @@ static unsigned __attribute__((noinline)) clip_poly(dmaPoly_t *p, unsigned p_vis
     case 29:
         verts_to_process = 5;
 
-        memcpy(p->dVerts[4].v, p->dVerts[3].v, sizeof(pvr_vertex_t));
+        memcpy32(p->dVerts[4].v, p->dVerts[3].v, sizeof(pvr_vertex_t));
         p->dVerts[4].w = p->dVerts[3].w;
 
         nearz_clip(&p->dVerts[1], &p->dVerts[3], &p->dVerts[3]);
@@ -447,7 +465,7 @@ static unsigned __attribute__((noinline)) clip_poly(dmaPoly_t *p, unsigned p_vis
     case 30:
         verts_to_process = 5;
 
-        memcpy(p->dVerts[4].v, p->dVerts[2].v, sizeof(pvr_vertex_t));
+        memcpy32(p->dVerts[4].v, p->dVerts[2].v, sizeof(pvr_vertex_t));
         p->dVerts[4].w = p->dVerts[2].w;
 
         nearz_clip(&p->dVerts[0], &p->dVerts[2], &p->dVerts[2]);
@@ -461,7 +479,11 @@ static unsigned __attribute__((noinline)) clip_poly(dmaPoly_t *p, unsigned p_vis
     case 31:
 
         break;
+#endif
+    default:
+        break;
     }
+
     return verts_to_process;
 }
 
@@ -509,10 +531,10 @@ typedef struct
     uint32_t kd;
 } material_t;
 
-#define MAX_VERTICES 10000
-#define MAX_FACES 10000
-#define MAX_TEXCOORDS 10000
-#define MAX_MATERIALS 128
+#define MAX_VERTICES 10240
+#define MAX_FACES 10240
+#define MAX_TEXCOORDS 10240
+#define MAX_MATERIALS 64
 
 static vertex_t __attribute__((aligned(32))) vertices[MAX_VERTICES];
 static face_t __attribute__((aligned(32))) faces[MAX_FACES];
@@ -529,9 +551,9 @@ static const float SCREEN_CENTER_X = 320.0f;
 static const float SCREEN_CENTER_Y = 240.0f;
 static const float FOV_COTANGENT = 1.732050808f;
 
-static float cam_x = 0.0f;
+static float cam_x = -18.0f;//0.0f;
 static float cam_y = -0.6f;
-static float cam_z = 10.0f;
+static float cam_z = -28.0f;//10.0f;
 static float cam_yaw = 0.0f;
 static float cam_pitch = 0.0f;
 
@@ -559,23 +581,40 @@ static void update_camera(cont_state_t *state)
     float speed_vertical = 0.0f;
     float speed_strafe = 0.0f;
 
-    if (state->rtrig > 0)
-        speed_forward = (float)state->rtrig * 0.002f;
-    if (state->ltrig > 0)
-        speed_forward = -(float)state->ltrig * 0.002f;
+    int fog_diff = 0;
 
+    if (state->rtrig > 0) {
+        fog_near += (float)state->rtrig * 0.0002f;
+        fog_diff++;
+    }
+    if (state->ltrig > 0) {
+        fog_near -= (float)state->ltrig * 0.0002f;
+        fog_diff++;
+    }
     if (state->buttons & CONT_DPAD_UP)
         speed_vertical = 0.15f;
     if (state->buttons & CONT_DPAD_DOWN)
         speed_vertical = -0.15f;
-    if (state->buttons & CONT_DPAD_LEFT)
-        speed_strafe = -0.15f;
-    if (state->buttons & CONT_DPAD_RIGHT)
-        speed_strafe = 0.15f;
-
-    float cx = fsin(cam_yaw) * fcos(cam_pitch);
-    float cy = fsin(cam_pitch);
-    float cz = -fcos(cam_yaw) * fcos(cam_pitch);
+    if (state->buttons & CONT_DPAD_LEFT) {
+        fog_far -= 0.025f;
+        fog_diff++;
+    }
+    if (state->buttons & CONT_DPAD_RIGHT) {
+        fog_far += 0.025f;
+        fog_diff++;
+    }
+    if (fog_near < 0.0f) {
+        fog_near = 0.0f;
+    }
+    if (fog_far < fog_near) {
+        fog_far = fog_near + 1.0f;
+    }
+    if (fog_diff) {
+	    pvr_fog_table_linear(fog_near, fog_far);
+    }
+    float cx = sinf(cam_yaw) * cosf(cam_pitch);
+    float cy = sinf(cam_pitch);
+    float cz = -cosf(cam_yaw) * cosf(cam_pitch);
 
     cam_x += cx * speed_forward;
     cam_y += cy * speed_forward;
@@ -584,14 +623,14 @@ static void update_camera(cont_state_t *state)
     cam_y += speed_vertical;
 
     float strafe_angle = cam_yaw - (F_PI * 0.5f);
-    cam_x += fsin(strafe_angle) * speed_strafe;
-    cam_z += -fcos(strafe_angle) * speed_strafe;
+    cam_x += sinf(strafe_angle) * speed_strafe;
+    cam_z += -cosf(strafe_angle) * speed_strafe;
 
     if (state->buttons & CONT_Y)
     {
-        cam_x = 0.0f;
+        cam_x = -18.0f;//0.0f;
         cam_y = -0.6f;
-        cam_z = 10.0f;
+        cam_z = -28.0f;//10.0f;
         cam_yaw = 0.0f;
         cam_pitch = 0.0f;
     }
@@ -600,30 +639,52 @@ static void update_camera(cont_state_t *state)
     {
         debug_color ^= 1;
     }
+
+    //printf("fog near %f far %f\n", fog_near, fog_far);
 }
 
 static texture_t *load_texture(const char *filename)
 {
-    texture_t *tex = malloc(sizeof(texture_t));
+    texture_t *tex = (texture_t *)malloc(sizeof(texture_t));
     kos_img_t img;
-
     // printf("Loading texture: %s\n", filename);
+
+    if (!tex) {
+        printf("failed to malloc tex for %s\n", filename);
+        exit(-1);
+    }
 
     if (png_to_img(filename, PNG_NO_ALPHA, &img) < 0)
     {
         // printf("Failed to load texture: %s\n", filename);
-        free(tex);
         return NULL;
     }
 
     tex->ptr = pvr_mem_malloc(img.byte_count);
+    if (!tex->ptr) {
+        printf("failed to allocate pvr mem for %s\n", filename);
+        free(tex);
+        kos_img_free(&img, 0);
+        exit(-1);
+    }
+
     tex->w = img.w;
     tex->h = img.h;
     tex->fmt = PVR_TXRFMT_RGB565;
-
     pvr_txr_load_kimg(&img, tex->ptr, 0);
     kos_img_free(&img, 0);
 
+#if 0
+    uint16_t *tp = (uint16_t *)tex->ptr;
+    for (int i=0;i<tex->w * tex->h;i++) {
+        uint16_t c = tp[i];
+        float r = (float)((uint8_t)((c >> 11)&0x1f) << 3);
+        float g = (float)((uint8_t)((c >> 5)&0x3f) << 2);
+        float b = (float)((uint8_t)(c & 0x1f) << 3);
+        uint8_t intensity = ((uint8_t)((0.299*r) + (0.587*g) + (0.114*b)) >> 3) & 0x1f;
+        tp[i] = (intensity << 11) | (intensity << 6) | intensity;
+    }
+#endif
     // printf("Texture loaded successfully: %s (%dx%d)\n", filename, tex->w, tex->h);
     return tex;
 }
@@ -635,7 +696,7 @@ static unsigned long int djb2_hash(char *s)
 
     result = ((result << 5) ^ result) ^ (s[0] & 0x7f);
 
-    for (i = 1; i < 64 && s[i] != '\0'; ++i)
+    for (i = 1; i < (strlen(s) - 1) && s[i] != '\0'; ++i)
         result = ((result << 5) ^ result) ^ s[i];
 
     return result;
@@ -688,13 +749,13 @@ static void load_mtl(const char *filename, pvr_list_t list)
             materials[current_mat].hash = djb2_hash(mat_name);
             materials[current_mat].texture = NULL;
             num_materials++;
-
-            // printf("Found material: %s\n", mat_name);
-
             char tex_path[256];
             snprintf(tex_path, sizeof(tex_path), "/rd/textures/%s_baseColor.png", mat_name);
             materials[current_mat].texture = load_texture(tex_path);
+
+            // printf("Found material: %s\n", mat_name);
             materials[current_mat].hdr = (pvr_poly_hdr_t *)malloc(sizeof(pvr_poly_hdr_t));
+            if (materials[current_mat].hdr)
             {
                 pvr_poly_cxt_t cxt;
 
@@ -713,33 +774,39 @@ static void load_mtl(const char *filename, pvr_list_t list)
                 cxt.gen.culling = PVR_CULLING_CCW;
                 cxt.depth.comparison = PVR_DEPTHCMP_GEQUAL;
                 cxt.depth.write = PVR_DEPTHWRITE_ENABLE;
-                //		        cxt.gen.fog_type = PVR_FOG_TABLE;
-                //		        cxt.gen.fog_type2 = PVR_FOG_TABLE;
-
+                cxt.gen.fog_type = PVR_FOG_TABLE;
+                cxt.gen.fog_type2 = PVR_FOG_TABLE;
+                cxt.gen.specular = PVR_SPECULAR_ENABLE;
                 pvr_poly_compile(materials[current_mat].hdr, &cxt);
             }
-            if (materials[current_mat].texture)
+            else 
             {
+                printf("Could not malloc header for material.\n");
+                fclose(file);
+                exit(-1);
+            }
+            //if (materials[current_mat].texture)
+            //{
                 // printf("Loaded texture for material %s\n", mat_name);
-            }
-            else
-            {
+            //}
+            //else
+            //{
                 // printf("No texture found for material %s\n", mat_name);
-            }
+            //}
         }
-        else if (strncmp(line, "Kd ", 3) == 0 && current_mat >= 0)
+        /* else if (strncmp(line, "Kd ", 3) == 0 && current_mat >= 0)
         {
             float nr, ng, nb;
             sscanf(line, "Kd %f %f %f", &nr, &ng, &nb);
             materials[current_mat].kd = (0xff000000) | (((uint8_t)(nr * 255)) << 16) | (((uint8_t)(ng * 255)) << 8) | ((uint8_t)(nb * 255));
-        }
+        } */
 
         else if (strncmp(line, "map_Kd ", 7) == 0 && current_mat >= 0)
         {
             if (!materials[current_mat].texture)
             {
                 char tex_name[128];
-                sscanf(line, "map_Kd %s", tex_name);
+                sscanf(line, "map_Kd %127s", tex_name);
 
                 char tex_path[256];
                 snprintf(tex_path, sizeof(tex_path), "/rd/textures/%s", tex_name);
@@ -756,11 +823,11 @@ static void load_mtl(const char *filename, pvr_list_t list)
                     }
                 }
 
-                if (materials[current_mat].texture)
-                {
+                //if (materials[current_mat].texture)
+                //{
                     // printf("Material %08x using texture: %s\n",
                     // materials[current_mat].hash, tex_name);
-                }
+                //}
             }
         }
     }
@@ -771,6 +838,10 @@ static void load_mtl(const char *filename, pvr_list_t list)
 
 static void load_obj(const char *filename, pvr_list_t list)
 {
+    char line[512];
+    float x, y, z, u, v;
+    int v1, v2, v3, t1, t2, t3;
+
     FILE *file = fopen(filename, "r");
     if (!file)
     {
@@ -783,9 +854,6 @@ static void load_obj(const char *filename, pvr_list_t list)
     num_texcoords = 0;
     current_material_id = -1;
 
-    char line[256];
-    float x, y, z, u, v;
-    int v1, v2, v3, t1, t2, t3;
 
     while (fgets(line, sizeof(line), file))
     {
@@ -795,16 +863,17 @@ static void load_obj(const char *filename, pvr_list_t list)
         if (strncmp(line, "mtllib ", 7) == 0)
         {
             char mtl_name[128];
-            sscanf(line, "mtllib %s", mtl_name);
+            sscanf(line, "mtllib %127s", mtl_name);
 
             char mtl_path[256];
             char *last_slash = strrchr(filename, '/');
             if (last_slash)
             {
                 int dir_len = last_slash - filename + 1;
-                strncpy(mtl_path, filename, dir_len);
-                mtl_path[dir_len] = '\0';
-                strcat(mtl_path, mtl_name);
+//                strncpy(mtl_path, filename, dir_len);
+//                mtl_path[dir_len] = '\0';
+//                strcat(mtl_path, mtl_name);
+                snprintf(mtl_path, sizeof mtl_path, "%.*s%s", dir_len, filename, mtl_name);
             }
             else
             {
@@ -818,7 +887,7 @@ static void load_obj(const char *filename, pvr_list_t list)
         else if (strncmp(line, "usemtl ", 7) == 0)
         {
             char mat_name[64];
-            sscanf(line, "usemtl %s", mat_name);
+            sscanf(line, "usemtl %63s", mat_name);
             current_material_id = find_material(mat_name);
             // printf("Using material: %s (id=%d)\n", mat_name, current_material_id);
         }
@@ -910,30 +979,46 @@ static void load_obj(const char *filename, pvr_list_t list)
 
 static void setup_matrix(void)
 {
+#if 1
+    matrix_t tmp;
     mat_identity();
-
     mat_perspective(SCREEN_CENTER_X,
                     SCREEN_CENTER_Y,
                     FOV_COTANGENT,
                     0.0f,
                     1000.0f);
-
     mat_rotate_y(-cam_yaw);
     mat_rotate_x(-cam_pitch);
-
     mat_translate(-cam_x, -cam_y, -cam_z);
-
-    matrix_t tmp;
     mat_store(&tmp);
     tmp[1][1] = -tmp[1][1];
     mat_load(&tmp);
+#else
+    shz_mat4x4_t tmp;
+    shz_xmtrx_init_identity();
+    shz_xmtrx_apply_screen(640, 480);
+    shz_xmtrx_apply_perspective(70.0f, 1.33333f, 0.0f);
+    shz_xmtrx_apply_rotation_y(-cam_yaw);
+    shz_xmtrx_apply_rotation_x(-cam_pitch);
+    shz_xmtrx_translate(-cam_x, -cam_y, -cam_z);
+//    shz_xmtrx_store_4x4(&tmp);
+//    tmp.elem2D[1][1] = -tmp.elem2D[1][1];
+//    shz_xmtrx_load_4x4(&tmp);
+#endif
 }
 
 static int render_model(pvr_list_t list)
 {
+    int last_drawn = 0;
+    uint32_t col_to_use = 0xffffffff;
+    int use_tex = 0;
     int last_material = -100;
+
+    pvr_poly_hdr_t *mat_hdr = &default_hdr;
+
     dmaPoly_t next_poly;
     dmaListVert_t *dV[3];
+
     __builtin_prefetch(&faces[0]);
 
     dV[0] = &next_poly.dVerts[2];
@@ -941,22 +1026,20 @@ static int render_model(pvr_list_t list)
     dV[2] = &next_poly.dVerts[0];
 
     setup_matrix();
-    int last_drawn = 0;
-    uint32_t col_to_use = 0xffffffff;
-    int use_tex = 0;
 
     for (int i = 0; i < num_faces; i++)
     {
         __builtin_prefetch(&faces[i + 1]);
+
         use_tex = 0;
+
         vertex_t *v1 = &vertices[faces[i].v1];
 
         float test_x = v1->x - cam_x;
         float test_y = v1->y - cam_y;
         float test_z = v1->z - cam_z;
-        float test_len;
-        vec3f_length(test_x, test_y, test_z, test_len);
 
+        float test_len = shz_vec3_magnitude( (shz_vec3_t){ .x = test_x, .y = test_y, .z = test_z } );
         if (test_len > 35.0f)
             continue;
 
@@ -969,18 +1052,23 @@ static int render_model(pvr_list_t list)
         {
             material_change = 1;
             last_material = faces[i].material_id;
-            col_to_use = materials[faces[i].material_id].kd;
+            if (debug_color || (last_material < 0))
+                mat_hdr = &default_hdr;
+            else
+                mat_hdr = materials[faces[i].material_id].hdr;
+
+            col_to_use = 0xffffffff;
         }
 
-//        __builtin_prefetch(materials[faces[i].material_id].hdr);
+        init_poly(list, &next_poly, mat_hdr, 3);
 
-        init_poly(list, &next_poly, materials[faces[i].material_id].hdr, 3);
+        // v0
 
         dV[0]->v->x = v1->x;
         dV[0]->v->y = v1->y;
         dV[0]->v->z = v1->z;
 
-        if (num_texcoords > 0 && faces[i].t1 >= 0 && faces[i].t1 < num_texcoords)
+        if (!debug_color && (num_texcoords > 0 && (faces[i].t1 >= 0) && (faces[i].t1 < num_texcoords)))
         {
             dV[0]->v->u = texcoords[faces[i].t1].u;
             dV[0]->v->v = texcoords[faces[i].t1].v;
@@ -991,12 +1079,16 @@ static int render_model(pvr_list_t list)
             dV[0]->v->u = 0.0f;
             dV[0]->v->v = 0.0f;
         }
-        dV[0]->v->argb = debug_color ? 0xffff0000 : col_to_use;
-        
+
+        dV[0]->v->argb = debug_color ? 0xffff00ff : col_to_use;
+        dV[0]->v->oargb = 0;
+
+        // v1
+
         dV[1]->v->x = v2->x;
         dV[1]->v->y = v2->y;
         dV[1]->v->z = v2->z;
-        if (use_tex) //num_texcoords > 0 && faces[i].t2 >= 0 && faces[i].t2 < num_texcoords)
+        if (use_tex) //(num_texcoords > 0 && (faces[i].t2 >= 0) && (faces[i].t2 < num_texcoords))
         {
             dV[1]->v->u = texcoords[faces[i].t2].u;
             dV[1]->v->v = texcoords[faces[i].t2].v;
@@ -1006,12 +1098,17 @@ static int render_model(pvr_list_t list)
             dV[1]->v->u = 0.0f;
             dV[1]->v->v = 0.0f;
         }
-        dV[1]->v->argb = debug_color ? 0xff00ff00 : col_to_use;
+
+        dV[1]->v->argb = debug_color ? 0xffffff00 : col_to_use;
+        dV[1]->v->oargb = 0;
+
+        // v2
+
         dV[2]->v->x = v3->x;
         dV[2]->v->y = v3->y;
         dV[2]->v->z = v3->z;
 
-        if (use_tex) //num_texcoords > 0 && faces[i].t3 >= 0 && faces[i].t3 < num_texcoords)
+        if (use_tex) //(num_texcoords > 0 && (faces[i].t3 >= 0) && (faces[i].t3 < num_texcoords))
         {
             dV[2]->v->u = texcoords[faces[i].t3].u;
             dV[2]->v->v = texcoords[faces[i].t3].v;
@@ -1021,7 +1118,9 @@ static int render_model(pvr_list_t list)
             dV[2]->v->u = 0.0f;
             dV[2]->v->v = 0.0f;
         }
-        dV[2]->v->argb = debug_color ? 0xff0000ff : col_to_use;
+        dV[2]->v->argb = debug_color ? 0xff00ffff : col_to_use;
+        dV[2]->v->oargb = 0;
+
         submit_poly(list, &next_poly);
     }
 
@@ -1033,12 +1132,21 @@ int main(int argc, char **argv)
     pvr_list_t poly_type = PVR_LIST_OP_POLY;
     pvr_init(&pvr_params);
     pvr_set_vertbuf(poly_type, list_vert_buf, VERTBUF_SIZE);
-
+    pvr_poly_cxt_t cxt;
+    pvr_poly_cxt_col(&cxt, poly_type);
+    cxt.gen.culling = PVR_CULLING_CCW;
+    cxt.depth.comparison = PVR_DEPTHCMP_GEQUAL;
+    cxt.depth.write = PVR_DEPTHWRITE_ENABLE;
+    cxt.gen.fog_type = PVR_FOG_TABLE;
+    cxt.gen.fog_type2 = PVR_FOG_TABLE;
+    cxt.gen.specular = PVR_SPECULAR_ENABLE;
+    pvr_poly_compile(&default_hdr, &cxt);
     load_obj("/rd/test/untitled.obj", poly_type);
 
     uint32 frames = 0;
     uint32 last_time = timer_ms_gettime64();
     float fps = 0.0f;
+	pvr_fog_table_linear(fog_near, fog_far);
 
     while (1)
     {
@@ -1048,17 +1156,27 @@ int main(int argc, char **argv)
             cont_state_t *state = (cont_state_t *)maple_dev_status(cont);
             if (state)
             {
-                update_camera(state);
                 if (state->buttons & CONT_START)
                     break;
+                update_camera(state);
             }
         }
 
         drawn = 0;
+        written_total = 0;
 
         pvr_wait_ready();
         pvr_scene_begin();
-        pvr_set_bg_color(0.102, 0.219, 0.165);
+        if (debug_color)
+        {
+            pvr_set_bg_color(0.0f, 0.0f, 0.0f);
+            pvr_fog_table_color(1.0f, 0.0f, 0.0f, 0.0f);
+        }
+        else
+        {
+            pvr_set_bg_color(0.102f*0.5f, 0.219f*0.5f, 0.165f*0.5f);
+            pvr_fog_table_color(1.0f, 0.102f*0.5f, 0.219f*0.5f, 0.165f*0.5f);
+        }
 
         int submitted = render_model(poly_type);
 
@@ -1069,8 +1187,8 @@ int main(int argc, char **argv)
         if (current_time - last_time >= 2000)
         {
             fps = (frames * 1000.0f) / (current_time - last_time);
-            printf("FPS: %.2f | Faces: %d (submitted %d, drawn %d) | Materials: %d | Cam: (%.1f, %.1f, %.1f)\n",
-                   fps, num_faces, submitted, drawn, num_materials, cam_x, cam_y, cam_z);
+            printf("FPS: %.2f | Fog: (%.3f, %.3f) | Faces: %d (submitted %d, drawn %d,) | Materials: %d | Cam: (%.1f, %.1f, %.1f)\n",
+                   fps, fog_near, fog_far, num_faces, submitted, drawn, num_materials, cam_x, cam_y, cam_z);
             frames = 0;
             last_time = current_time;
         }
@@ -1078,15 +1196,17 @@ int main(int argc, char **argv)
 
     for (int i = 0; i < num_materials; i++)
     {
+        if (materials[i].hdr)
+        {
+            free(materials[i].hdr);
+        }
+
         if (materials[i].texture)
         {
             pvr_mem_free(materials[i].texture->ptr);
             free(materials[i].texture);
-            free(materials[i].hdr);
         }
     }
-
-    exit(0);
 
     return 0;
 }

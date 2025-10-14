@@ -1,9 +1,9 @@
 TARGET = test.elf
-OBJS = main_dma.o romdisk.o
+OBJS = memcpy32.o main_dma.o romdisk.o
 KOS_ROMDISK_DIR = romdisk
 
 # Optimization flags
-KOS_CFLAGS += -O3 \
+KOS_CFLAGS += -std=gnu23 -Os \
               -fomit-frame-pointer -ffast-math -ffp-contract=fast \
               -fmerge-all-constants -funroll-loops \
               -ftree-vectorize
@@ -19,7 +19,7 @@ rm-elf:
 	-rm -f $(TARGET) romdisk.*
 
 $(TARGET): $(OBJS)
-	kos-cc -o $(TARGET) $(OBJS) -lGL -lpng -ljpeg -lkmg -lz -lkosutils -lm
+	kos-cc -o $(TARGET) $(OBJS) -lGL -lpng -ljpeg -lkmg -lz -lkosutils -lm -lsh4zam
 
 run: $(TARGET)
 	$(KOS_LOADER) $(TARGET)
