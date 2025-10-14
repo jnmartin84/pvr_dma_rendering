@@ -55,11 +55,8 @@ static int material_change = 0;
 static pvr_poly_hdr_t default_hdr;
 static float fog_near = 8.0f;
 static float fog_far = 27.0f;
-#define approx_recip(x) (1.0f / sqrtf((x) * (x)))
 
 #define lerp(a, b, t) ((a) + (((b) - (a)) * (t)))
-
-#define transform_dmaListVert(dmav) mat_trans_single3_nodivw((dmav)->v->x, (dmav)->v->y, (dmav)->v->z, (dmav)->w)
 
 void *memcpy32(void *restrict dst, const void *restrict src, size_t bytes);
 
@@ -130,7 +127,7 @@ static void nearz_clip(const dmaListVert_t *restrict v1,
     const float d1 = v2->w + v2->v->z;
     const float diff_d1d0 = (d1 - d0);
 
-    float t = fabsf(d0) * approx_recip(diff_d1d0);
+    float t = fabsf(d0) * shz_invf_fsrra(diff_d1d0);
 
     out->w = lerp(v1->w, v2->w, t);
 
