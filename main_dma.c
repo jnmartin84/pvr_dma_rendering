@@ -56,8 +56,6 @@ static pvr_poly_hdr_t default_hdr;
 static float fog_near = 8.0f;
 static float fog_far = 27.0f;
 
-#define lerp(a, b, t) ((a) + (((b) - (a)) * (t)))
-
 /*
 credit to Kazade / glDC code for my near-z clipping implementation
 https://github.com/Kazade/GLdc/blob/572fa01b03b070e8911db43ca1fb55e3a4f8bdd5/GL/platforms/software.c#L140
