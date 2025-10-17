@@ -1097,7 +1097,7 @@ int main(int argc, char **argv)
             if (state)
             {
                 // if you want to be able to exit back to dcload, change the 0 to a 1 and rebuild
-#if 1
+#if 0
                 if (state->buttons & CONT_START)
                     break;
 #endif
