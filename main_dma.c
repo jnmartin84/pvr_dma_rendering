@@ -58,8 +58,6 @@ static float fog_far = 27.0f;
 
 #define lerp(a, b, t) ((a) + (((b) - (a)) * (t)))
 
-void *memcpy32(void *restrict dst, const void *restrict src, size_t bytes);
-
 /*
 credit to Kazade / glDC code for my near-z clipping implementation
 https://github.com/Kazade/GLdc/blob/572fa01b03b070e8911db43ca1fb55e3a4f8bdd5/GL/platforms/software.c#L140
@@ -129,31 +127,28 @@ static void nearz_clip(const dmaListVert_t *restrict v1,
 
     float t = fabsf(d0) * shz_invf_fsrra(diff_d1d0);
 
-    out->w = lerp(v1->w, v2->w, t);
+    out->w = shz_lerpf(v1->w, v2->w, t);
 
-    out->v->x = lerp(v1->v->x, v2->v->x, t);
-    out->v->y = lerp(v1->v->y, v2->v->y, t);
-    out->v->z = lerp(v1->v->z, v2->v->z, t);
+    out->v->x = shz_lerpf(v1->v->x, v2->v->x, t);
+    out->v->y = shz_lerpf(v1->v->y, v2->v->y, t);
+    out->v->z = shz_lerpf(v1->v->z, v2->v->z, t);
 
-    out->v->u = lerp(v1->v->u, v2->v->u, t);
-    out->v->v = lerp(v1->v->v, v2->v->v, t);
+    out->v->u = shz_lerpf(v1->v->u, v2->v->u, t);
+    out->v->v = shz_lerpf(v1->v->v, v2->v->v, t);
 
     out->v->argb = color_lerp(t, v1->v->argb, v2->v->argb);
     out->v->oargb = color_lerp(t, v1->v->oargb, v2->v->oargb);
 }
+
 static size_t written_total = 0;
+
 // initialize a dmaPoly_t * for rendering the next polygon
 // n_verts	3 for triangle
 //			4 for quad
 // diffuse_hdr is pointer to header to submit if a new pvr header submission is required
 static void init_poly(int list, dmaPoly_t *poly, pvr_poly_hdr_t *diffuse_hdr, unsigned n_verts)
 {
-    if ((written_total + (6 * 32)) >= (VERTBUF_SIZE / 4))
-    {
-        printf("overflow list buffer\n");
-        exit(-1);
-    }
-
+    // there should really be an overflow check here
     void *list_tail = (void *)pvr_vertbuf_tail(list);
 
     poly->n_verts = n_verts;
@@ -164,7 +159,7 @@ static void init_poly(int list, dmaPoly_t *poly, pvr_poly_hdr_t *diffuse_hdr, un
     if (material_change)
     {
         // copy the contents of the header into poly struct
-        memcpy32(poly->hdr, diffuse_hdr, sizeof(pvr_poly_hdr_t));
+        shz_memcpy32(poly->hdr, diffuse_hdr, sizeof(pvr_poly_hdr_t));
 
         // advance the vertbuf/DMA list position
         list_tail += sizeof(pvr_poly_hdr_t);
@@ -317,7 +312,7 @@ static unsigned __attribute__((noinline)) clip_poly(dmaPoly_t *p, unsigned p_vis
     case 6:
         verts_to_process = 4;
 
-        memcpy32(p->dVerts[3].v, p->dVerts[2].v, sizeof(pvr_vertex_t));
+        shz_memcpy32(p->dVerts[3].v, p->dVerts[2].v, sizeof(pvr_vertex_t));
         p->dVerts[3].w = p->dVerts[2].w;
 
         nearz_clip(&p->dVerts[0], &p->dVerts[2], &p->dVerts[2]);
@@ -403,7 +398,7 @@ static unsigned __attribute__((noinline)) clip_poly(dmaPoly_t *p, unsigned p_vis
         nearz_clip(&p->dVerts[1], &p->dVerts[3], &p->dVerts[0]);
         nearz_clip(&p->dVerts[2], &p->dVerts[3], &p->dVerts[2]);
 
-        memcpy32(p->dVerts[1].v, p->dVerts[3].v, sizeof(pvr_vertex_t));
+        shz_memcpy32(p->dVerts[1].v, p->dVerts[3].v, sizeof(pvr_vertex_t));
         p->dVerts[1].w = p->dVerts[3].w;
 
         p->dVerts[1].v->flags = PVR_CMD_VERTEX;
@@ -446,7 +441,7 @@ static unsigned __attribute__((noinline)) clip_poly(dmaPoly_t *p, unsigned p_vis
     case 29:
         verts_to_process = 5;
 
-        memcpy32(p->dVerts[4].v, p->dVerts[3].v, sizeof(pvr_vertex_t));
+        shz_memcpy32(p->dVerts[4].v, p->dVerts[3].v, sizeof(pvr_vertex_t));
         p->dVerts[4].w = p->dVerts[3].w;
 
         nearz_clip(&p->dVerts[1], &p->dVerts[3], &p->dVerts[3]);
@@ -461,7 +456,7 @@ static unsigned __attribute__((noinline)) clip_poly(dmaPoly_t *p, unsigned p_vis
     case 30:
         verts_to_process = 5;
 
-        memcpy32(p->dVerts[4].v, p->dVerts[2].v, sizeof(pvr_vertex_t));
+        shz_memcpy32(p->dVerts[4].v, p->dVerts[2].v, sizeof(pvr_vertex_t));
         p->dVerts[4].w = p->dVerts[2].w;
 
         nearz_clip(&p->dVerts[0], &p->dVerts[2], &p->dVerts[2]);
@@ -559,8 +554,8 @@ static void update_camera(cont_state_t *state)
 
     float speed_forward = 0.0f;
 
-    float joy_x = (float)state->joyx / 128.0f;
-    float joy_y = (float)state->joyy / 128.0f;
+    float joy_x = (float)state->joyx * 0.0078125f;
+    float joy_y = (float)state->joyy * 0.0078125f;
 
     if (fabs(joy_x) > 0.1f)
         cam_yaw += joy_x * 0.09f;
@@ -642,6 +637,9 @@ static void update_camera(cont_state_t *state)
         fog_near = 8.0f;
         fog_far = 27.0f;
         debug_color = 0;
+        pvr_set_bg_color(0.102f * 0.5f, 0.219f * 0.5f, 0.165f * 0.5f);
+        pvr_fog_table_color(1.0f, 0.102f * 0.5f, 0.219f * 0.5f, 0.165f * 0.5f);
+        pvr_fog_table_linear(fog_near, fog_far);
     }
 
     if (state->buttons & CONT_A)
@@ -960,7 +958,7 @@ static int render_model(pvr_list_t list)
     int use_tex = 0;
     int last_material = -100;
 
-    __builtin_prefetch(&faces[0]);
+    SHZ_PREFETCH(&faces[0]);
 
     dV[0] = &next_poly.dVerts[2];
     dV[1] = &next_poly.dVerts[1];
@@ -970,7 +968,7 @@ static int render_model(pvr_list_t list)
 
     for (int i = 0; i < num_faces; i++)
     {
-        __builtin_prefetch(&faces[i + 1]);
+        SHZ_PREFETCH(&faces[i + 1]);
 
         use_tex = 0;
 
@@ -1101,7 +1099,7 @@ int main(int argc, char **argv)
             if (state)
             {
                 // if you want to be able to exit back to dcload, change the 0 to a 1 and rebuild
-#if 0
+#if 1
                 if (state->buttons & CONT_START)
                     break;
 #endif
@@ -1135,7 +1133,7 @@ int main(int argc, char **argv)
 
         if (current_time - last_time >= 2000)
         {
-            fps = (frames * 1000.0f) / (current_time - last_time);
+            fps = shz_divf((frames * 1000.0f), (current_time - last_time));
             printf("FPS: %.2f | Fog: (%.3f, %.3f) | Faces: %d (submitted %d, drawn %d,) | Materials: %d | Cam: (%.1f, %.1f, %.1f)\n",
                    fps, fog_near, fog_far, num_faces, submitted, drawn, num_materials, cam_x, cam_y, cam_z);
             frames = 0;

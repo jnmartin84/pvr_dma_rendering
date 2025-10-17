@@ -1,5 +1,5 @@
 TARGET = test.elf
-OBJS = memcpy32.o main_dma.o romdisk.o
+OBJS = main_dma.o romdisk.o
 KOS_ROMDISK_DIR = romdisk
 
 # Optimization flags
