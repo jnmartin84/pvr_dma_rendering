@@ -46,7 +46,7 @@ typedef struct
 {
     unsigned n_verts;
     pvr_poly_hdr_t *hdr;
-    dmaListVert_t __attribute__((aligned(32))) dVerts[5];
+    dmaListVert_t dVerts[5];
 } dmaPoly_t;
 
 static int debug_color = 0;
@@ -202,7 +202,7 @@ static void submit_poly(int list, dmaPoly_t *p)
     unsigned verts_to_process = p->n_verts;
 
     // apply loaded transform matrix to each vertex
-    // transform is a single `mat_trans_single3_nodivw` per vertex
+    // transform is a single `shz_xmtrx_transform_vec4` per vertex
     dmaListVert_t *dv = p->dVerts;
     for (i = 0; i < verts_to_process; i++)
     {
