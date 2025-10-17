@@ -230,8 +230,7 @@ static void submit_poly(int list, dmaPoly_t *p)
     else
         p->dVerts[2].v->flags = PVR_CMD_VERTEX_EOL;
 
-    if (p_vismask != 7)
-        verts_to_process = clip_poly(p, p_vismask);
+    verts_to_process = clip_poly(p, p_vismask);
 
     if (!verts_to_process)
         return;
