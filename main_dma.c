@@ -9,7 +9,7 @@
 /*
  Vertex DMA buffer.
  */
-#define VERTBUF_SIZE (1024 * 1024 * 5)
+#define VERTBUF_SIZE (1024 * 1024 * 1)
 
 uint8_t __attribute__((aligned(32))) list_vert_buf[VERTBUF_SIZE];
 
